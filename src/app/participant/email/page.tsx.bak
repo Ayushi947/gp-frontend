@@ -1,0 +1,321 @@
+'use client';
+
+import { useState, useEffect, Suspense } from 'react';
+import Link from 'next/link';
+import Image from 'next/image';
+import { useRouter, useSearchParams } from 'next/navigation';
+import { useForm } from 'react-hook-form';
+import { zodResolver } from '@hookform/resolvers/zod';
+import { z } from 'zod';
+import {
+  IconArrowRight,
+  IconMail,
+  IconLoader2,
+  IconAlertCircle,
+} from '@tabler/icons-react';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { toast } from '@/lib/toast';
+import { ROUTES } from '@/config/routes';
+import {
+  // TODO: These endpoints need to be implemented in the backend and API regenerated
+  // useVerifyParticipantEmail,
+  useSendOTPForEmployee,
+  // useValidateInviteToken,
+} from '@/api/generated/endpoints/authentication/authentication';
+
+const emailSchema = z.object({
+  email: z.string().email('Please enter a valid email address'),
+});
+
+type EmailFormData = z.infer<typeof emailSchema>;
+
+function ParticipantEmailContent() {
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const [tokenError, setTokenError] = useState<string | null>(null);
+
+  const inviteToken = searchParams.get('token');
+
+  // TODO: Re-enable when backend endpoints are implemented
+  // const verifyEmailMutation = useVerifyParticipantEmail();
+  const sendOtpMutation = useSendOTPForEmployee();
+  // const validateInviteTokenMutation = useValidateInviteToken();
+
+  const isLoading = sendOtpMutation.isPending;
+  const isValidatingToken = false; // validateInviteTokenMutation.isPending;
+
+  const {
+    register,
+    handleSubmit,
+    formState: { errors },
+  } = useForm<EmailFormData>({
+    resolver: zodResolver(emailSchema),
+  });
+
+  // Handle invite token validation on page load
+  useEffect(() => {
+    if (inviteToken) {
+      handleValidateInviteToken(inviteToken);
+    }
+  }, [inviteToken]);
+
+  const handleValidateInviteToken = (token: string) => {
+    setTokenError(null);
+
+    validateInviteTokenMutation.mutate(
+      { data: { token } },
+      {
+        onSuccess: (response) => {
+          if (response.valid && response.email) {
+            // Token is valid - save data and skip OTP verification
+            sessionStorage.setItem('participantEmail', response.email);
+            sessionStorage.setItem('participantInviteToken', token);
+            if (response.participantToken) {
+              sessionStorage.setItem('participantToken', response.participantToken);
+            }
+            if (response.tenantId) {
+              sessionStorage.setItem('participantTenantId', response.tenantId);
+            }
+
+            toast.success('Invite verified!', 'Proceeding to complete your enrollment.');
+
+            // Skip OTP and go directly to identity verification
+            router.push(ROUTES.PARTICIPANT_ENROLLMENT.IDENTITY_VERIFICATION);
+          } else {
+            setTokenError(response.message || 'This invite link is invalid or has expired.');
+          }
+        },
+        onError: (error: unknown) => {
+          const err = error as { response?: { data?: { message?: string } } };
+          setTokenError(
+            err?.response?.data?.message ||
+            'Unable to validate invite. The link may be invalid or expired.'
+          );
+        },
+      }
+    );
+  };
+
+  const onSubmit = async (data: EmailFormData) => {
+    const email = data.email.trim();
+
+    // Step 1: Verify participant email exists
+    verifyEmailMutation.mutate(
+      { data: { email } },
+      {
+        onSuccess: (response) => {
+          if (!response.exists) {
+            toast.error(
+              'Email not found',
+              response.message ||
+              "We couldn't find this email in our records. Please ensure you're using the email registered with your employer's 401(k) plan."
+            );
+            return;
+          }
+
+          // Step 2: Send OTP to the verified email
+          sendOtpMutation.mutate(
+            { data: { email } },
+            {
+              onSuccess: () => {
+                // Save participant info to session storage
+                sessionStorage.setItem('participantEmail', email);
+                if (response.tenantId) {
+                  sessionStorage.setItem('participantTenantId', response.tenantId);
+                }
+
+                toast.success('Verification code sent!', 'Check your email inbox.');
+                router.push(ROUTES.PARTICIPANT_ENROLLMENT.VERIFY_OTP);
+              },
+              onError: (error: unknown) => {
+                const err = error as { response?: { data?: { message?: string } } };
+                toast.error(
+                  'Failed to send code',
+                  err?.response?.data?.message || 'Unable to send verification code. Please try again.'
+                );
+              },
+            }
+          );
+        },
+        onError: (error: unknown) => {
+          const err = error as { response?: { data?: { message?: string } } };
+          toast.error(
+            'Verification failed',
+            err?.response?.data?.message || 'Unable to verify email. Please try again.'
+          );
+        },
+      }
+    );
+  };
+
+  // Show loading state while validating invite token
+  if (isValidatingToken) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-muted/30 p-4">
+        <Card className="w-full max-w-md">
+          <CardContent className="pt-6">
+            <div className="flex flex-col items-center gap-4 py-8">
+              <IconLoader2 className="h-12 w-12 animate-spin text-primary" />
+              <p className="text-muted-foreground">Validating your invite...</p>
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
+
+  // Show error if token validation failed
+  if (tokenError) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-muted/30 p-4">
+        <Card className="w-full max-w-md">
+          <CardHeader className="text-center">
+            <div className="flex justify-center mb-4">
+              <div className="flex items-center gap-3">
+                <Image
+                  src="/assets/images/dash_logo.svg"
+                  alt="GlidingPath Logo"
+                  width={40}
+                  height={40}
+                  className="w-10 h-10"
+                />
+                <span className="text-2xl font-bold">GlidingPath</span>
+              </div>
+            </div>
+            <CardTitle className="text-2xl">Invite Link Issue</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-6">
+            <div className="flex items-start gap-3 p-4 rounded-lg bg-destructive/10 border border-destructive/20">
+              <IconAlertCircle className="h-5 w-5 text-destructive shrink-0 mt-0.5" />
+              <div>
+                <p className="font-medium text-destructive">Invalid or Expired Link</p>
+                <p className="text-sm text-destructive/80 mt-1">{tokenError}</p>
+              </div>
+            </div>
+
+            <p className="text-sm text-muted-foreground text-center">
+              You can still enroll by entering your email address below, or contact your HR department for a new invite link.
+            </p>
+
+            <Button
+              onClick={() => {
+                setTokenError(null);
+                router.replace(ROUTES.PARTICIPANT_ENROLLMENT.EMAIL);
+              }}
+              className="w-full"
+            >
+              Continue with Email
+            </Button>
+
+            <div className="text-center text-sm">
+              <span className="text-muted-foreground">Already have an account? </span>
+              <Link
+                href={ROUTES.AUTH.LOGIN}
+                className="font-medium text-primary hover:underline"
+              >
+                Sign In
+              </Link>
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
+
+  // Normal email entry form (self-enrollment)
+  return (
+    <div className="min-h-screen flex items-center justify-center bg-muted/30 p-4">
+      <Card className="w-full max-w-md">
+        <CardHeader className="text-center">
+          <div className="flex justify-center mb-4">
+            <div className="flex items-center gap-3">
+              <Image
+                src="/assets/images/dash_logo.svg"
+                alt="GlidingPath Logo"
+                width={40}
+                height={40}
+                className="w-10 h-10"
+              />
+              <span className="text-2xl font-bold">GlidingPath</span>
+            </div>
+          </div>
+          <CardTitle className="text-2xl">Access Your 401(k) Plan</CardTitle>
+          <CardDescription>
+            Enter the email address registered with your employer
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <form onSubmit={handleSubmit(onSubmit)} className="space-y-6">
+            {/* Email Field */}
+            <div className="space-y-2">
+              <Label htmlFor="email">
+                Work Email <span className="text-error">*</span>
+              </Label>
+              <div className="relative">
+                <IconMail className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+                <Input
+                  id="email"
+                  type="email"
+                  placeholder="Enter your work email"
+                  autoComplete="email"
+                  disabled={isLoading}
+                  {...register('email')}
+                  className={`pl-10 ${errors.email ? 'border-error' : ''}`}
+                />
+              </div>
+              {errors.email && (
+                <p className="text-xs text-error">{errors.email.message}</p>
+              )}
+            </div>
+
+            {/* Info Banner */}
+            <div className="p-4 rounded-lg bg-muted/50 text-sm text-muted-foreground">
+              <p>
+                Please use the email address your employer has on file for your 401(k) plan.
+                If you received an invite email, please use the link in that email instead.
+              </p>
+            </div>
+
+            {/* Submit Button */}
+            <Button
+              type="submit"
+              disabled={isLoading}
+              loading={isLoading}
+              loadingText="Verifying..."
+              className="w-full"
+            >
+              Continue
+              <IconArrowRight className="h-4 w-4 ml-2" />
+            </Button>
+
+            {/* Sign In Link */}
+            <div className="text-center text-sm">
+              <span className="text-muted-foreground">Already have an account? </span>
+              <Link
+                href={ROUTES.AUTH.LOGIN}
+                className="font-medium text-primary hover:underline"
+              >
+                Sign In
+              </Link>
+            </div>
+          </form>
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
+export default function ParticipantEmailPage() {
+  return (
+    <Suspense fallback={
+      <div className="min-h-screen flex items-center justify-center bg-gray-50 py-12 px-4 sm:px-6 lg:px-8">
+        <div className="animate-spin h-8 w-8 border-4 border-primary border-t-transparent rounded-full" />
+      </div>
+    }>
+      <ParticipantEmailContent />
+    </Suspense>
+  );
+}

@@ -1,0 +1,479 @@
+'use client';
+
+import { useState, useMemo } from 'react';
+import {
+  IconFileText,
+  IconDownload,
+  IconAlertCircle,
+  IconCheck,
+  IconClock,
+  IconX,
+  IconCalendar,
+  IconInfoCircle,
+} from '@tabler/icons-react';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Button } from '@/components/ui/button';
+import { Skeleton } from '@/components/ui/skeleton';
+import { Badge } from '@/components/ui/badge';
+import { DashboardContent } from '@/components/layout/dashboard-layout';
+import { useListReports5 } from '@/api/generated/endpoints/annual-reports/annual-reports';
+import { formatDate } from '@/lib/utils';
+import { exportReportData } from '@/lib/report-export';
+import { toast } from '@/lib/toast';
+
+// Form 5500 Filing Requirements
+const FORM_5500_INFO = {
+  DEADLINE_MONTHS: 7, // 7 months after plan year end
+  EXTENSION_MONTHS: 2.5, // Additional 2.5 months with extension
+  LATE_FILING_PENALTY: 250, // $250 per day (up to $150,000)
+};
+
+interface YearSelectorProps {
+  selectedYear: number;
+  onYearChange: (year: number) => void;
+}
+
+function YearSelector({ selectedYear, onYearChange }: YearSelectorProps) {
+  const currentYear = new Date().getFullYear();
+  const years = [currentYear - 1, currentYear - 2, currentYear - 3, currentYear - 4, currentYear - 5];
+
+  return (
+    <div className="flex gap-2">
+      {years.map((year) => (
+        <Button
+          key={year}
+          variant={selectedYear === year ? 'default' : 'outline'}
+          size="sm"
+          onClick={() => onYearChange(year)}
+        >
+          {year}
+        </Button>
+      ))}
+    </div>
+  );
+}
+
+function PageHeader() {
+  return (
+    <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+      <div>
+        <div className="flex items-center gap-2">
+          <IconFileText className="h-6 w-6" />
+          <h1 className="text-2xl font-bold tracking-tight">Form 5500 Filing Tracker</h1>
+        </div>
+        <p className="text-muted-foreground mt-1">
+          Track annual Form 5500 filing status, deadlines, and compliance requirements
+        </p>
+      </div>
+    </div>
+  );
+}
+
+function getFilingStatusBadge(status: string | undefined) {
+  const statusUpper = status?.toUpperCase() || 'UNKNOWN';
+
+  const variants: Record<
+    string,
+    { variant: 'default' | 'destructive' | 'outline' | 'secondary'; icon: any; label: string }
+  > = {
+    PUBLISHED: { variant: 'default', icon: IconCheck, label: 'FILED' },
+    FILED: { variant: 'default', icon: IconCheck, label: 'FILED' },
+    DRAFT: { variant: 'secondary', icon: IconClock, label: 'IN PROGRESS' },
+    IN_PROGRESS: { variant: 'secondary', icon: IconClock, label: 'IN PROGRESS' },
+    NOT_STARTED: { variant: 'outline', icon: IconClock, label: 'NOT STARTED' },
+    LATE: { variant: 'destructive', icon: IconX, label: 'LATE' },
+    EXTENDED: { variant: 'outline', icon: IconCalendar, label: 'EXTENDED' },
+  };
+
+  const config = variants[statusUpper] || { variant: 'outline' as const, icon: IconAlertCircle, label: statusUpper };
+  const Icon = config.icon;
+
+  return (
+    <Badge variant={config.variant} className="gap-1">
+      {Icon && <Icon className="h-3 w-3" />}
+      {config.label}
+    </Badge>
+  );
+}
+
+function Form5500InfoCard() {
+  return (
+    <Card className="border-l-4 border-l-blue-500">
+      <CardContent className="pt-6">
+        <div className="flex items-start gap-3">
+          <IconInfoCircle className="h-5 w-5 text-blue-500 flex-shrink-0" />
+          <div className="space-y-2">
+            <p className="font-semibold">Form 5500 Filing Requirements</p>
+            <div className="text-sm text-muted-foreground space-y-1">
+              <p>
+                <strong>Filing Deadline:</strong> {FORM_5500_INFO.DEADLINE_MONTHS} months after plan year end (July 31
+                for calendar year plans)
+              </p>
+              <p>
+                <strong>Extension Available:</strong> Additional {FORM_5500_INFO.EXTENSION_MONTHS} months (October 15
+                for calendar year plans)
+              </p>
+              <p>
+                <strong>Late Filing Penalty:</strong> ${FORM_5500_INFO.LATE_FILING_PENALTY} per day up to $150,000
+              </p>
+              <p>
+                <strong>Required Schedules:</strong> Form 5500 may require schedules such as Schedule H (financial
+                information), Schedule R (retirement plan information), and Schedule A (insurance information)
+              </p>
+              <p>
+                <strong>Electronic Filing:</strong> All Form 5500 filings must be submitted electronically through the
+                DOL EFAST2 system
+              </p>
+            </div>
+          </div>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function calculateDeadline(year: number, isExtended: boolean = false): Date {
+  // Form 5500 is due 7 months after plan year end (July 31 for calendar year plans)
+  const deadline = new Date(year + 1, 6, 31); // July 31 of next year
+  if (isExtended) {
+    // Extension adds 2.5 months (to October 15)
+    deadline.setMonth(9); // October
+    deadline.setDate(15);
+  }
+  return deadline;
+}
+
+function getDaysUntilDeadline(year: number, isExtended: boolean = false): number {
+  const deadline = calculateDeadline(year, isExtended);
+  const today = new Date();
+  const diffTime = deadline.getTime() - today.getTime();
+  const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+  return diffDays;
+}
+
+export default function Form5500FilingTrackerPage() {
+  const currentYear = new Date().getFullYear();
+  const [selectedYear, setSelectedYear] = useState(currentYear - 1); // Default to last year (most recent filing)
+  const [page, setPage] = useState(0);
+  const pageSize = 20;
+
+  // Fetch Form 5500 filings from annual reports API
+  const { data: filingData, isLoading, error } = useListReports5({
+    page,
+    size: pageSize,
+  });
+
+  // Filter to Form 5500 reports only and calculate summary
+  const summary = useMemo(() => {
+    if (!filingData?.content) {
+      return {
+        totalFilings: 0,
+        filed: 0,
+        inProgress: 0,
+        notStarted: 0,
+        late: 0,
+      };
+    }
+
+    // For demo purposes, we're using annual reports as proxy for Form 5500 filings
+    const filings = filingData.content;
+    let filed = 0;
+    let inProgress = 0;
+    let notStarted = 0;
+    let late = 0;
+
+    filings.forEach((filing) => {
+      const status = filing.status?.toUpperCase() || 'NOT_STARTED';
+      if (status === 'PUBLISHED' || status === 'FILED') {
+        filed++;
+      } else if (status === 'DRAFT' || status === 'IN_PROGRESS') {
+        inProgress++;
+      } else if (status === 'LATE') {
+        late++;
+      } else {
+        notStarted++;
+      }
+    });
+
+    return {
+      totalFilings: filings.length,
+      filed,
+      inProgress,
+      notStarted,
+      late,
+    };
+  }, [filingData]);
+
+  // Export handler
+  const handleExport = async (format: 'csv' | 'excel' | 'pdf') => {
+    if (!filingData?.content || filingData.content.length === 0) {
+      toast.error('No data to export', 'Please wait for data to load');
+      return;
+    }
+
+    const exportData_array = filingData.content.map((filing) => {
+      const daysUntil = getDaysUntilDeadline(filing.year || currentYear - 1, false);
+      const deadline = calculateDeadline(filing.year || currentYear - 1, false);
+
+      return {
+        Year: filing.year || 'N/A',
+        Title: filing.title || 'Form 5500',
+        Status: filing.status || 'NOT_STARTED',
+        'Filing Deadline': formatDate(deadline.toISOString()),
+        'Days Until Deadline': daysUntil > 0 ? daysUntil : 'Overdue',
+        'Publish Date': filing.publishDate ? formatDate(filing.publishDate) : 'Not filed',
+      };
+    });
+
+    await exportReportData(exportData_array, format, `Form_5500_Filing_Tracker_${selectedYear}`);
+    toast.success('Export successful', `Report exported as ${format.toUpperCase()}`);
+  };
+
+  if (error) {
+    return (
+      <DashboardContent>
+        <PageHeader />
+        <Card>
+          <CardContent className="flex flex-col items-center justify-center py-12">
+            <IconAlertCircle className="h-12 w-12 text-error mb-4" />
+            <h3 className="text-lg font-semibold mb-2">Unable to Load Filing Data</h3>
+            <p className="text-muted-foreground text-center mb-4">
+              There was an error loading the Form 5500 filing tracker. Please try again.
+            </p>
+          </CardContent>
+        </Card>
+      </DashboardContent>
+    );
+  }
+
+  return (
+    <DashboardContent>
+      <PageHeader />
+
+      {/* Year Selector and Export */}
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex items-center gap-4">
+          <span className="text-sm font-medium">Plan Year:</span>
+          <YearSelector selectedYear={selectedYear} onYearChange={setSelectedYear} />
+        </div>
+        <div className="flex gap-2">
+          <Button variant="outline" size="sm" onClick={() => handleExport('csv')}>
+            <IconDownload className="mr-2 h-4 w-4" />
+            CSV
+          </Button>
+          <Button variant="outline" size="sm" onClick={() => handleExport('excel')}>
+            <IconDownload className="mr-2 h-4 w-4" />
+            Excel
+          </Button>
+          <Button variant="outline" size="sm" onClick={() => handleExport('pdf')}>
+            <IconDownload className="mr-2 h-4 w-4" />
+            PDF
+          </Button>
+        </div>
+      </div>
+
+      {/* Form 5500 Info Card */}
+      <Form5500InfoCard />
+
+      {/* Summary Cards */}
+      {isLoading ? (
+        <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+          {Array.from({ length: 4 }).map((_, i) => (
+            <Card key={i}>
+              <CardHeader className="pb-2">
+                <Skeleton className="h-4 w-24" />
+              </CardHeader>
+              <CardContent>
+                <Skeleton className="h-8 w-32 mb-2" />
+                <Skeleton className="h-3 w-20" />
+              </CardContent>
+            </Card>
+          ))}
+        </div>
+      ) : (
+        <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-5">
+          <Card className="border-l-4 border-l-success">
+            <CardHeader className="pb-2">
+              <CardTitle className="text-sm font-medium text-muted-foreground">Filed</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="text-2xl font-bold tabular-nums text-success">{summary.filed}</div>
+              <p className="text-xs text-muted-foreground mt-1">Successfully filed</p>
+            </CardContent>
+          </Card>
+          <Card className="border-l-4 border-l-warning">
+            <CardHeader className="pb-2">
+              <CardTitle className="text-sm font-medium text-muted-foreground">In Progress</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="text-2xl font-bold tabular-nums text-warning">{summary.inProgress}</div>
+              <p className="text-xs text-muted-foreground mt-1">Being prepared</p>
+            </CardContent>
+          </Card>
+          <Card className="border-l-4 border-l-error">
+            <CardHeader className="pb-2">
+              <CardTitle className="text-sm font-medium text-muted-foreground">Late</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="text-2xl font-bold tabular-nums text-error">{summary.late}</div>
+              <p className="text-xs text-muted-foreground mt-1">Past deadline</p>
+            </CardContent>
+          </Card>
+          <Card>
+            <CardHeader className="pb-2">
+              <CardTitle className="text-sm font-medium text-muted-foreground">Not Started</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="text-2xl font-bold tabular-nums">{summary.notStarted}</div>
+              <p className="text-xs text-muted-foreground mt-1">Awaiting preparation</p>
+            </CardContent>
+          </Card>
+          <Card>
+            <CardHeader className="pb-2">
+              <CardTitle className="text-sm font-medium text-muted-foreground">Total</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="text-2xl font-bold tabular-nums">{summary.totalFilings}</div>
+              <p className="text-xs text-muted-foreground mt-1">All plan years</p>
+            </CardContent>
+          </Card>
+        </div>
+      )}
+
+      {/* Filing Tracker Table */}
+      <Card>
+        <CardHeader>
+          <CardTitle>Form 5500 Filing Status</CardTitle>
+          <CardDescription>
+            Annual return/report filing status for all plan years ({filingData?.content?.length || 0} filings)
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          {isLoading ? (
+            <div className="space-y-4">
+              {Array.from({ length: 5 }).map((_, i) => (
+                <Skeleton key={i} className="h-16 w-full" />
+              ))}
+            </div>
+          ) : filingData?.content && filingData.content.length > 0 ? (
+            <div className="space-y-4">
+              {filingData.content.map((filing, index) => {
+                const filingYear = filing.year || currentYear - 1;
+                const daysUntil = getDaysUntilDeadline(filingYear, false);
+                const deadline = calculateDeadline(filingYear, false);
+                const isOverdue = daysUntil < 0;
+                const isApproaching = daysUntil > 0 && daysUntil <= 30;
+
+                return (
+                  <Card key={filing.id || index} className="overflow-hidden">
+                    <div className="flex items-start justify-between p-4">
+                      <div className="flex-1">
+                        <div className="flex items-center gap-3 mb-2">
+                          <h3 className="font-semibold text-lg">Plan Year {filingYear}</h3>
+                          {getFilingStatusBadge(filing.status)}
+                          {isOverdue && filing.status?.toUpperCase() !== 'PUBLISHED' && (
+                            <Badge variant="destructive" className="gap-1">
+                              <IconAlertCircle className="h-3 w-3" />
+                              OVERDUE
+                            </Badge>
+                          )}
+                          {isApproaching && filing.status?.toUpperCase() !== 'PUBLISHED' && (
+                            <Badge variant="outline" className="gap-1 border-warning text-warning">
+                              <IconClock className="h-3 w-3" />
+                              DUE SOON
+                            </Badge>
+                          )}
+                        </div>
+
+                        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-sm">
+                          <div>
+                            <span className="text-muted-foreground">Filing Deadline:</span>
+                            <span className="ml-2 font-medium">{formatDate(deadline.toISOString())}</span>
+                          </div>
+                          <div>
+                            <span className="text-muted-foreground">Days Until Deadline:</span>
+                            <span
+                              className={`ml-2 font-medium ${isOverdue ? 'text-error' : isApproaching ? 'text-warning' : ''}`}
+                            >
+                              {isOverdue ? `${Math.abs(daysUntil)} days overdue` : `${daysUntil} days`}
+                            </span>
+                          </div>
+                          <div>
+                            <span className="text-muted-foreground">Filed Date:</span>
+                            <span className="ml-2 font-medium">
+                              {filing.publishDate ? formatDate(filing.publishDate) : 'Not filed'}
+                            </span>
+                          </div>
+                        </div>
+
+                        {filing.description && (
+                          <div className="mt-2 p-2 bg-muted rounded text-sm">
+                            <span className="font-medium">Notes:</span> {filing.description}
+                          </div>
+                        )}
+
+                        {isOverdue && filing.status?.toUpperCase() !== 'PUBLISHED' && (
+                          <div className="mt-2 p-2 bg-error/10 rounded text-sm text-error">
+                            <IconAlertCircle className="inline h-4 w-4 mr-1" />
+                            <span className="font-medium">Late Filing Penalty:</span> $
+                            {FORM_5500_INFO.LATE_FILING_PENALTY} per day (${Math.abs(daysUntil) * FORM_5500_INFO.LATE_FILING_PENALTY} total)
+                          </div>
+                        )}
+                      </div>
+
+                      {filing.downloadUrl && (
+                        <Button variant="outline" size="sm" onClick={() => window.open(filing.downloadUrl, '_blank')}>
+                          <IconDownload className="h-4 w-4" />
+                        </Button>
+                      )}
+                    </div>
+                  </Card>
+                );
+              })}
+            </div>
+          ) : (
+            <div className="text-center py-12 text-muted-foreground">
+              No Form 5500 filing data available for {selectedYear}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* Required Schedules Reference */}
+      <Card>
+        <CardHeader>
+          <CardTitle>Required Schedules Reference</CardTitle>
+          <CardDescription>Common schedules that may be required with Form 5500</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="grid gap-4 md:grid-cols-2">
+            <div className="p-4 border rounded-lg">
+              <h4 className="font-semibold mb-2">Schedule H</h4>
+              <p className="text-sm text-muted-foreground">
+                Financial Information - Required for large plans (100+ participants) with $250,000+ in assets
+              </p>
+            </div>
+            <div className="p-4 border rounded-lg">
+              <h4 className="font-semibold mb-2">Schedule R</h4>
+              <p className="text-sm text-muted-foreground">
+                Retirement Plan Information - Required for pension plans to report distributions and funding
+              </p>
+            </div>
+            <div className="p-4 border rounded-lg">
+              <h4 className="font-semibold mb-2">Schedule A</h4>
+              <p className="text-sm text-muted-foreground">
+                Insurance Information - Required if plan provides benefits through insurance contracts
+              </p>
+            </div>
+            <div className="p-4 border rounded-lg">
+              <h4 className="font-semibold mb-2">Schedule C</h4>
+              <p className="text-sm text-muted-foreground">
+                Service Provider Information - Required for service provider fees over $5,000
+              </p>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+    </DashboardContent>
+  );
+}

@@ -1,0 +1,430 @@
+'use client';
+
+import { useState, useMemo } from 'react';
+import { useRouter } from 'next/navigation';
+import { IconDownload, IconClipboardList, IconAlertCircle, IconCheck, IconClock, IconArrowLeft } from '@tabler/icons-react';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Button } from '@/components/ui/button';
+import { Skeleton } from '@/components/ui/skeleton';
+import { Badge } from '@/components/ui/badge';
+import { DashboardContent } from '@/components/layout/dashboard-layout';
+import { useGenerateReport1 } from '@/api/generated/endpoints/payroll-report-controller/payroll-report-controller';
+import { formatCurrency, formatDate } from '@/lib/utils';
+import { exportReportData } from '@/lib/report-export';
+import { toast } from '@/lib/toast';
+
+// DOL Timely Deposit Requirements
+const DOL_DEPOSIT_DAYS = {
+  SMALL_PLAN: 7, // <100 participants
+  LARGE_PLAN: 3, // 100+ participants (must deposit by next business day after 3 days)
+};
+
+interface DateRangePickerProps {
+  startDate: string;
+  endDate: string;
+  onStartDateChange: (date: string) => void;
+  onEndDateChange: (date: string) => void;
+}
+
+function DateRangePicker({ startDate, endDate, onStartDateChange, onEndDateChange }: DateRangePickerProps) {
+  return (
+    <div className="flex flex-wrap gap-4">
+      <div className="flex flex-col gap-1">
+        <label htmlFor="startDate" className="text-sm font-medium">
+          Start Date
+        </label>
+        <input
+          type="date"
+          id="startDate"
+          value={startDate}
+          onChange={(e) => onStartDateChange(e.target.value)}
+          className="px-3 py-2 border rounded-md"
+        />
+      </div>
+      <div className="flex flex-col gap-1">
+        <label htmlFor="endDate" className="text-sm font-medium">
+          End Date
+        </label>
+        <input
+          type="date"
+          id="endDate"
+          value={endDate}
+          onChange={(e) => onEndDateChange(e.target.value)}
+          className="px-3 py-2 border rounded-md"
+        />
+      </div>
+    </div>
+  );
+}
+
+function PageHeader() {
+  return (
+    <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+      <div>
+        <div className="flex items-center gap-2">
+          <IconClipboardList className="h-6 w-6" />
+          <h1 className="text-2xl font-bold tracking-tight">Payroll Reports</h1>
+        </div>
+        <p className="text-muted-foreground mt-1">
+          Payroll processing history and contribution reconciliation with DOL timely deposit tracking
+        </p>
+      </div>
+    </div>
+  );
+}
+
+function getStatusBadge(status: string | undefined) {
+  const statusUpper = status?.toUpperCase() || 'UNKNOWN';
+
+  const variants: Record<string, { variant: 'default' | 'destructive' | 'outline' | 'secondary'; icon: any }> = {
+    COMPLETED: { variant: 'default', icon: IconCheck },
+    COMPLETE: { variant: 'default', icon: IconCheck },
+    PENDING: { variant: 'secondary', icon: IconClock },
+    FAILED: { variant: 'destructive', icon: IconAlertCircle },
+    ERROR: { variant: 'destructive', icon: IconAlertCircle },
+  };
+
+  const config = variants[statusUpper] || { variant: 'outline' as const, icon: IconClock };
+  const Icon = config.icon;
+
+  return (
+    <Badge variant={config.variant} className="gap-1">
+      {Icon && <Icon className="h-3 w-3" />}
+      {statusUpper}
+    </Badge>
+  );
+}
+
+export default function PayrollReportsPage() {
+  const router = useRouter();
+  // Default to current month
+  const today = new Date();
+  const firstDayOfMonth = new Date(today.getFullYear(), today.getMonth(), 1);
+  const lastDayOfMonth = new Date(today.getFullYear(), today.getMonth() + 1, 0);
+
+  const [startDate, setStartDate] = useState(firstDayOfMonth.toISOString().split('T')[0] || '');
+  const [endDate, setEndDate] = useState(lastDayOfMonth.toISOString().split('T')[0] || '');
+  const [page, setPage] = useState(0);
+  const pageSize = 20;
+
+  // Fetch payroll data
+  const { data: payrollData, isLoading, error } = useGenerateReport1({
+    startDate,
+    endDate,
+    page,
+    size: pageSize,
+  });
+
+  // Calculate summary statistics
+  const summary = useMemo(() => {
+    if (!payrollData?.payrollRuns) {
+      return {
+        totalPayrolls: 0,
+        totalTraditional: 0,
+        totalRoth: 0,
+        totalEmployer: 0,
+        totalLoanRepayment: 0,
+        grandTotal: 0,
+      };
+    }
+
+    const runs = payrollData.payrollRuns;
+    let totalTraditional = 0;
+    let totalRoth = 0;
+    let totalEmployer = 0;
+    let totalLoanRepayment = 0;
+
+    runs.forEach((run) => {
+      totalTraditional += run.traditional401k || 0;
+      totalRoth += run.roth401k || 0;
+      totalEmployer += run.employerContribution || 0;
+      totalLoanRepayment += run.loanRepayment || 0;
+    });
+
+    const grandTotal = totalTraditional + totalRoth + totalEmployer + totalLoanRepayment;
+
+    return {
+      totalPayrolls: runs.length,
+      totalTraditional,
+      totalRoth,
+      totalEmployer,
+      totalLoanRepayment,
+      grandTotal,
+    };
+  }, [payrollData]);
+
+  // Export handler
+  const handleExport = async (format: 'csv' | 'excel' | 'pdf') => {
+    if (!payrollData?.payrollRuns || payrollData.payrollRuns.length === 0) {
+      toast.error('No data to export', 'Please wait for data to load');
+      return;
+    }
+
+    const exportData_array = payrollData.payrollRuns.map((run) => ({
+      'Pay Date': formatDate(run.payDate),
+      Status: run.payrollRunStatus || 'N/A',
+      'Job Execution ID': run.jobExecutionId?.toString() || 'N/A',
+      'Traditional 401(k)': formatCurrency(run.traditional401k || 0),
+      'Roth 401(k)': formatCurrency(run.roth401k || 0),
+      'Employer Contributions': formatCurrency(run.employerContribution || 0),
+      'Loan Repayment': formatCurrency(run.loanRepayment || 0),
+      Total: formatCurrency(
+        (run.traditional401k || 0) + (run.roth401k || 0) + (run.employerContribution || 0) + (run.loanRepayment || 0)
+      ),
+    }));
+
+    await await exportReportData(exportData_array, format, `Payroll_Report_${startDate}_to_${endDate}`);
+    toast.success('Export successful', `Report exported as ${format.toUpperCase()}`);
+  };
+
+  if (error) {
+    return (
+      <DashboardContent>
+        <div className="mb-4">
+          <Button
+            variant="outline"
+            size="sm"
+            className="inline-flex items-center gap-2"
+            onClick={() => router.push('/reports')}
+          >
+            <IconArrowLeft className="h-4 w-4" />
+            Back
+          </Button>
+        </div>
+        <PageHeader />
+        <Card>
+          <CardContent className="flex flex-col items-center justify-center py-12">
+            <IconAlertCircle className="h-12 w-12 text-error mb-4" />
+            <h3 className="text-lg font-semibold mb-2">Unable to Load Report</h3>
+            <p className="text-muted-foreground text-center mb-4">
+              There was an error loading the payroll report. Please try again.
+            </p>
+          </CardContent>
+        </Card>
+      </DashboardContent>
+    );
+  }
+
+  return (
+    <DashboardContent>
+      <div className="mb-4">
+        <Button
+          variant="outline"
+          size="sm"
+          className="inline-flex items-center gap-2"
+          onClick={() => router.push('/reports')}
+        >
+          <IconArrowLeft className="h-4 w-4" />
+          Back
+        </Button>
+      </div>
+      <PageHeader />
+
+      {/* Date Range and Export */}
+      <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+        <DateRangePicker
+          startDate={startDate}
+          endDate={endDate}
+          onStartDateChange={setStartDate}
+          onEndDateChange={setEndDate}
+        />
+        <div className="flex gap-2">
+          <Button variant="outline" size="sm" onClick={() => handleExport('csv')}>
+            <IconDownload className="mr-2 h-4 w-4" />
+            CSV
+          </Button>
+          <Button variant="outline" size="sm" onClick={() => handleExport('excel')}>
+            <IconDownload className="mr-2 h-4 w-4" />
+            Excel
+          </Button>
+          <Button variant="outline" size="sm" onClick={() => handleExport('pdf')}>
+            <IconDownload className="mr-2 h-4 w-4" />
+            PDF
+          </Button>
+        </div>
+      </div>
+
+      {/* DOL Compliance Notice */}
+      <Card className="border-l-4 border-l-blue-500">
+        <CardContent className="pt-6">
+          <div className="flex items-start gap-3">
+            <IconAlertCircle className="h-5 w-5 text-blue-500" />
+            <div>
+              <p className="font-semibold">DOL Timely Deposit Requirements</p>
+              <p className="text-sm text-muted-foreground mt-1">
+                Small plans (&lt;100 participants): Deposit within {DOL_DEPOSIT_DAYS.SMALL_PLAN} business days
+                <br />
+                Large plans (100+ participants): Deposit by next business day after {DOL_DEPOSIT_DAYS.LARGE_PLAN} days
+              </p>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Summary Cards */}
+      {isLoading ? (
+        <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+          {Array.from({ length: 4 }).map((_, i) => (
+            <Card key={i}>
+              <CardHeader className="pb-2">
+                <Skeleton className="h-4 w-24" />
+              </CardHeader>
+              <CardContent>
+                <Skeleton className="h-8 w-32 mb-2" />
+                <Skeleton className="h-3 w-20" />
+              </CardContent>
+            </Card>
+          ))}
+        </div>
+      ) : (
+        <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-5">
+          <Card>
+            <CardHeader className="pb-2">
+              <CardTitle className="text-sm font-medium text-muted-foreground">Payroll Runs</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="text-2xl font-bold tabular-nums">{summary.totalPayrolls}</div>
+              <p className="text-xs text-muted-foreground mt-1">Total processed</p>
+            </CardContent>
+          </Card>
+          <Card>
+            <CardHeader className="pb-2">
+              <CardTitle className="text-sm font-medium text-muted-foreground">Traditional 401(k)</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="text-2xl font-bold tabular-nums">{formatCurrency(summary.totalTraditional)}</div>
+              <p className="text-xs text-muted-foreground mt-1">Pre-tax deferrals</p>
+            </CardContent>
+          </Card>
+          <Card>
+            <CardHeader className="pb-2">
+              <CardTitle className="text-sm font-medium text-muted-foreground">Roth 401(k)</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="text-2xl font-bold tabular-nums">{formatCurrency(summary.totalRoth)}</div>
+              <p className="text-xs text-muted-foreground mt-1">After-tax deferrals</p>
+            </CardContent>
+          </Card>
+          <Card>
+            <CardHeader className="pb-2">
+              <CardTitle className="text-sm font-medium text-muted-foreground">Employer Match</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="text-2xl font-bold tabular-nums">{formatCurrency(summary.totalEmployer)}</div>
+              <p className="text-xs text-muted-foreground mt-1">Matching contributions</p>
+            </CardContent>
+          </Card>
+          <Card>
+            <CardHeader className="pb-2">
+              <CardTitle className="text-sm font-medium text-muted-foreground">Grand Total</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="text-2xl font-bold tabular-nums">{formatCurrency(summary.grandTotal)}</div>
+              <p className="text-xs text-muted-foreground mt-1">All contributions</p>
+            </CardContent>
+          </Card>
+        </div>
+      )}
+
+      {/* Payroll Runs Table */}
+      <Card>
+        <CardHeader>
+          <CardTitle>Payroll Run Details</CardTitle>
+          <CardDescription>
+            Showing {payrollData?.payrollRuns?.length || 0} payroll runs from {formatDate(startDate)} to{' '}
+            {formatDate(endDate)}
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          {isLoading ? (
+            <div className="space-y-4">
+              {Array.from({ length: 10 }).map((_, i) => (
+                <Skeleton key={i} className="h-12 w-full" />
+              ))}
+            </div>
+          ) : payrollData?.payrollRuns && payrollData.payrollRuns.length > 0 ? (
+            <>
+              <div className="overflow-x-auto">
+                <table className="w-full">
+                  <thead>
+                    <tr className="border-b">
+                      <th className="text-left p-3 font-medium">Pay Date</th>
+                      <th className="text-left p-3 font-medium">Status</th>
+                      <th className="text-left p-3 font-medium">Job ID</th>
+                      <th className="text-right p-3 font-medium">Traditional 401(k)</th>
+                      <th className="text-right p-3 font-medium">Roth 401(k)</th>
+                      <th className="text-right p-3 font-medium">Employer</th>
+                      <th className="text-right p-3 font-medium">Loan Repayment</th>
+                      <th className="text-right p-3 font-medium">Total</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {payrollData.payrollRuns.map((run, index) => {
+                      const total =
+                        (run.traditional401k || 0) +
+                        (run.roth401k || 0) +
+                        (run.employerContribution || 0) +
+                        (run.loanRepayment || 0);
+
+                      return (
+                        <tr key={index} className="border-b hover:bg-muted/50">
+                          <td className="p-3">{formatDate(run.payDate)}</td>
+                          <td className="p-3">{getStatusBadge(run.payrollRunStatus)}</td>
+                          <td className="p-3 text-sm text-muted-foreground">
+                            {run.jobExecutionId || 'N/A'}
+                          </td>
+                          <td className="p-3 text-right tabular-nums">
+                            {formatCurrency(run.traditional401k || 0)}
+                          </td>
+                          <td className="p-3 text-right tabular-nums">{formatCurrency(run.roth401k || 0)}</td>
+                          <td className="p-3 text-right tabular-nums">
+                            {formatCurrency(run.employerContribution || 0)}
+                          </td>
+                          <td className="p-3 text-right tabular-nums">
+                            {formatCurrency(run.loanRepayment || 0)}
+                          </td>
+                          <td className="p-3 text-right tabular-nums font-medium">{formatCurrency(total)}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+
+              {/* Pagination */}
+              {(payrollData.totalPages ?? 0) > 1 && (
+                <div className="flex items-center justify-between mt-4">
+                  <p className="text-sm text-muted-foreground">
+                    Page {page + 1} of {payrollData.totalPages}
+                  </p>
+                  <div className="flex gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setPage((p) => Math.max(0, p - 1))}
+                      disabled={page === 0}
+                    >
+                      Previous
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setPage((p) => p + 1)}
+                      disabled={page >= ((payrollData.totalPages ?? 1) - 1)}
+                    >
+                      Next
+                    </Button>
+                  </div>
+                </div>
+              )}
+            </>
+          ) : (
+            <div className="text-center py-12 text-muted-foreground">
+              No payroll data available for the selected date range
+            </div>
+          )}
+        </CardContent>
+      </Card>
+    </DashboardContent>
+  );
+}

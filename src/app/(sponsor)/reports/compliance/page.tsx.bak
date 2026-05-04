@@ -1,0 +1,395 @@
+'use client';
+
+import { useState, useMemo } from 'react';
+import {
+  IconShieldCheck,
+  IconAlertTriangle,
+  IconCheck,
+  IconClock,
+  IconX,
+  IconDownload,
+  IconInfoCircle,
+} from '@tabler/icons-react';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Button } from '@/components/ui/button';
+import { Skeleton } from '@/components/ui/skeleton';
+import { Badge } from '@/components/ui/badge';
+import { DashboardContent } from '@/components/layout/dashboard-layout';
+import { useGetComplianceStatus } from '@/api/generated/endpoints/compliance-testing/compliance-testing';
+import { formatDate } from '@/lib/utils';
+import { exportReportData } from '@/lib/report-export';
+import { toast } from '@/lib/toast';
+
+interface YearSelectorProps {
+  selectedYear: number | undefined;
+  onYearChange: (year: number) => void;
+}
+
+function YearSelector({ selectedYear, onYearChange }: YearSelectorProps) {
+  const currentYear = new Date().getFullYear();
+  const years = [currentYear, currentYear - 1, currentYear - 2, currentYear - 3];
+
+  return (
+    <div className="flex gap-2">
+      {years.map((year) => (
+        <Button
+          key={year}
+          variant={selectedYear === year ? 'default' : 'outline'}
+          size="sm"
+          onClick={() => onYearChange(year)}
+        >
+          {year}
+        </Button>
+      ))}
+    </div>
+  );
+}
+
+function PageHeader() {
+  return (
+    <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+      <div>
+        <div className="flex items-center gap-2">
+          <IconShieldCheck className="h-6 w-6" />
+          <h1 className="text-2xl font-bold tracking-tight">Compliance Testing Dashboard</h1>
+        </div>
+        <p className="text-muted-foreground mt-1">
+          Monitor IRS compliance test results for ADP, ACP, Top Heavy, and 410(b) Coverage
+        </p>
+      </div>
+    </div>
+  );
+}
+
+function getStatusBadge(status: string | undefined) {
+  const statusUpper = status?.toUpperCase() || 'UNKNOWN';
+
+  const variants: Record<
+    string,
+    { variant: 'default' | 'destructive' | 'outline' | 'secondary'; icon: any; label: string }
+  > = {
+    PASSED: { variant: 'default', icon: IconCheck, label: 'PASSED' },
+    FAILED: { variant: 'destructive', icon: IconX, label: 'FAILED' },
+    PENDING: { variant: 'secondary', icon: IconClock, label: 'PENDING' },
+    IN_PROGRESS: { variant: 'secondary', icon: IconClock, label: 'IN PROGRESS' },
+    CORRECTED: { variant: 'outline', icon: IconCheck, label: 'CORRECTED' },
+    WAIVED: { variant: 'outline', icon: IconCheck, label: 'WAIVED' },
+  };
+
+  const config = variants[statusUpper] || { variant: 'outline' as const, icon: IconAlertTriangle, label: statusUpper };
+  const Icon = config.icon;
+
+  return (
+    <Badge variant={config.variant} className="gap-1">
+      {Icon && <Icon className="h-3 w-3" />}
+      {config.label}
+    </Badge>
+  );
+}
+
+function formatPercentage(value: number | string | undefined): string {
+  if (value === undefined || value === null) return 'N/A';
+  const numValue = typeof value === 'string' ? parseFloat(value) : value;
+  return `${numValue.toFixed(2)}%`;
+}
+
+function ComplianceInfoCard() {
+  return (
+    <Card className="border-l-4 border-l-blue-500">
+      <CardContent className="pt-6">
+        <div className="flex items-start gap-3">
+          <IconInfoCircle className="h-5 w-5 text-blue-500 flex-shrink-0" />
+          <div className="space-y-2">
+            <p className="font-semibold">401(k) Compliance Testing Requirements</p>
+            <div className="text-sm text-muted-foreground space-y-1">
+              <p>
+                <strong>ADP Test (§401(k)):</strong> Actual Deferral Percentage - Ensures HCEs don't defer
+                disproportionately more than NHCEs
+              </p>
+              <p>
+                <strong>ACP Test (§401(m)):</strong> Actual Contribution Percentage - Ensures fair employer matching
+                between HCEs and NHCEs
+              </p>
+              <p>
+                <strong>Top Heavy Test (§416):</strong> Tests if &gt;60% of plan assets go to key employees; requires
+                minimum contributions if top heavy
+              </p>
+              <p>
+                <strong>410(b) Coverage Test:</strong> Ensures plan covers minimum percentage of non-HCEs (70% ratio
+                test or average benefits test)
+              </p>
+            </div>
+          </div>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+export default function ComplianceTestingPage() {
+  const currentYear = new Date().getFullYear();
+  const [selectedYear, setSelectedYear] = useState<number | undefined>(undefined);
+
+  // Fetch compliance status - defaults to latest year if not specified
+  const { data: complianceData, isLoading, error } = useGetComplianceStatus({
+    year: selectedYear,
+  });
+
+  // Calculate summary statistics
+  const summary = useMemo(() => {
+    if (!complianceData) {
+      return {
+        needsAttention: 0,
+        warnings: 0,
+        passed: 0,
+        total: 0,
+      };
+    }
+
+    return {
+      needsAttention: complianceData.needsAttention || 0,
+      warnings: complianceData.warning || 0,
+      passed: complianceData.passes || 0,
+      total: (complianceData.needsAttention || 0) + (complianceData.warning || 0) + (complianceData.passes || 0),
+    };
+  }, [complianceData]);
+
+  // Export handler
+  const handleExport = (format: 'csv' | 'excel' | 'pdf') => {
+    if (!complianceData?.tests || complianceData.tests.length === 0) {
+      toast.error('No data to export', 'Please wait for data to load');
+      return;
+    }
+
+    const exportData_array = complianceData.tests.map((test) => ({
+      'Test Name': test.testName || 'N/A',
+      Status: test.status || 'N/A',
+      'HCE Average': test.hceAverage || 'N/A',
+      'NHCE Average': test.nhceAverage || 'N/A',
+      'Top Heavy Ratio': test.topHeavyRatio || 'N/A',
+      'Coverage Ratio': test.coverageRatio || 'N/A',
+      'Corrective Action': test.correctiveAction || 'None',
+    }));
+
+    const year = selectedYear || complianceData.testYear || currentYear;
+    exportData(exportData_array, format, `Compliance_Tests_${year}`);
+    toast.success('Export successful', `Report exported as ${format.toUpperCase()}`);
+  };
+
+  if (error) {
+    return (
+      <DashboardContent>
+        <PageHeader />
+        <Card>
+          <CardContent className="flex flex-col items-center justify-center py-12">
+            <IconAlertTriangle className="h-12 w-12 text-error mb-4" />
+            <h3 className="text-lg font-semibold mb-2">Unable to Load Compliance Data</h3>
+            <p className="text-muted-foreground text-center mb-4">
+              There was an error loading the compliance testing data. Please try again.
+            </p>
+          </CardContent>
+        </Card>
+      </DashboardContent>
+    );
+  }
+
+  return (
+    <DashboardContent>
+      <PageHeader />
+
+      {/* Year Selector and Export */}
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex items-center gap-4">
+          <span className="text-sm font-medium">Test Year:</span>
+          <YearSelector selectedYear={selectedYear} onYearChange={setSelectedYear} />
+        </div>
+        <div className="flex gap-2">
+          <Button variant="outline" size="sm" onClick={() => handleExport('csv')}>
+            <IconDownload className="mr-2 h-4 w-4" />
+            CSV
+          </Button>
+          <Button variant="outline" size="sm" onClick={() => handleExport('excel')}>
+            <IconDownload className="mr-2 h-4 w-4" />
+            Excel
+          </Button>
+          <Button variant="outline" size="sm" onClick={() => handleExport('pdf')}>
+            <IconDownload className="mr-2 h-4 w-4" />
+            PDF
+          </Button>
+        </div>
+      </div>
+
+      {/* Compliance Info Card */}
+      <ComplianceInfoCard />
+
+      {/* Summary Cards */}
+      {isLoading ? (
+        <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+          {Array.from({ length: 4 }).map((_, i) => (
+            <Card key={i}>
+              <CardHeader className="pb-2">
+                <Skeleton className="h-4 w-24" />
+              </CardHeader>
+              <CardContent>
+                <Skeleton className="h-8 w-32 mb-2" />
+                <Skeleton className="h-3 w-20" />
+              </CardContent>
+            </Card>
+          ))}
+        </div>
+      ) : (
+        <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+          <Card className="border-l-4 border-l-error">
+            <CardHeader className="pb-2">
+              <CardTitle className="text-sm font-medium text-muted-foreground">Needs Attention</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="text-2xl font-bold tabular-nums text-error">{summary.needsAttention}</div>
+              <p className="text-xs text-muted-foreground mt-1">Failed tests</p>
+            </CardContent>
+          </Card>
+          <Card className="border-l-4 border-l-warning">
+            <CardHeader className="pb-2">
+              <CardTitle className="text-sm font-medium text-muted-foreground">Warnings</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="text-2xl font-bold tabular-nums text-warning">{summary.warnings}</div>
+              <p className="text-xs text-muted-foreground mt-1">Pending/In progress</p>
+            </CardContent>
+          </Card>
+          <Card className="border-l-4 border-l-success">
+            <CardHeader className="pb-2">
+              <CardTitle className="text-sm font-medium text-muted-foreground">Passed</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="text-2xl font-bold tabular-nums text-success">{summary.passed}</div>
+              <p className="text-xs text-muted-foreground mt-1">Tests passed</p>
+            </CardContent>
+          </Card>
+          <Card>
+            <CardHeader className="pb-2">
+              <CardTitle className="text-sm font-medium text-muted-foreground">Total Tests</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="text-2xl font-bold tabular-nums">{summary.total}</div>
+              <p className="text-xs text-muted-foreground mt-1">For {complianceData?.testYear || currentYear}</p>
+            </CardContent>
+          </Card>
+        </div>
+      )}
+
+      {/* Compliance Tests Table */}
+      <Card>
+        <CardHeader>
+          <CardTitle>Compliance Test Results</CardTitle>
+          <CardDescription>
+            Test results for {complianceData?.testYear || selectedYear || currentYear} (
+            {complianceData?.tests?.length || 0} tests)
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          {isLoading ? (
+            <div className="space-y-4">
+              {Array.from({ length: 4 }).map((_, i) => (
+                <Skeleton key={i} className="h-16 w-full" />
+              ))}
+            </div>
+          ) : complianceData?.tests && complianceData.tests.length > 0 ? (
+            <div className="space-y-4">
+              {complianceData.tests.map((test, index) => (
+                <Card key={test.id || index} className="overflow-hidden">
+                  <div className="flex items-start justify-between p-4">
+                    <div className="flex-1">
+                      <div className="flex items-center gap-3 mb-2">
+                        <h3 className="font-semibold">{test.testName || `Test ${index + 1}`}</h3>
+                        {getStatusBadge(test.status)}
+                      </div>
+                      <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+                        {test.hceAverage && (
+                          <div>
+                            <span className="text-muted-foreground">HCE Average:</span>
+                            <span className="ml-2 font-medium">{formatPercentage(test.hceAverage)}</span>
+                          </div>
+                        )}
+                        {test.nhceAverage && (
+                          <div>
+                            <span className="text-muted-foreground">NHCE Average:</span>
+                            <span className="ml-2 font-medium">{formatPercentage(test.nhceAverage)}</span>
+                          </div>
+                        )}
+                        {test.topHeavyRatio && (
+                          <div>
+                            <span className="text-muted-foreground">Top Heavy Ratio:</span>
+                            <span className="ml-2 font-medium">{formatPercentage(test.topHeavyRatio)}</span>
+                          </div>
+                        )}
+                        {test.coverageRatio && (
+                          <div>
+                            <span className="text-muted-foreground">Coverage Ratio:</span>
+                            <span className="ml-2 font-medium">{formatPercentage(test.coverageRatio)}</span>
+                          </div>
+                        )}
+                      </div>
+                      {test.correctiveAction && (
+                        <div className="mt-2 p-2 bg-muted rounded text-sm">
+                          <span className="font-medium">Corrective Action:</span> {test.correctiveAction}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </Card>
+              ))}
+            </div>
+          ) : (
+            <div className="text-center py-12 text-muted-foreground">
+              No compliance test data available for {complianceData?.testYear || selectedYear || currentYear}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* HCE/NHCE Breakdown (if available) */}
+      {complianceData?.employees && complianceData.employees.length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Employee Classification Breakdown</CardTitle>
+            <CardDescription>HCE (Highly Compensated Employee) vs NHCE breakdown</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="overflow-x-auto">
+              <table className="w-full">
+                <thead>
+                  <tr className="border-b">
+                    <th className="text-left p-3 font-medium">Employee Name</th>
+                    <th className="text-left p-3 font-medium">Classification</th>
+                    <th className="text-right p-3 font-medium">ADP %</th>
+                    <th className="text-right p-3 font-medium">ACP %</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {complianceData.employees.slice(0, 10).map((employee, index) => (
+                    <tr key={employee.participantId || index} className="border-b hover:bg-muted/50">
+                      <td className="p-3">{employee.employeeName || 'N/A'}</td>
+                      <td className="p-3">
+                        <Badge variant={employee.category === 'HCE' ? 'default' : 'outline'}>
+                          {employee.category || 'N/A'}
+                        </Badge>
+                      </td>
+                      <td className="p-3 text-right tabular-nums">{employee.adpPercentage || 'N/A'}</td>
+                      <td className="p-3 text-right tabular-nums">{employee.acpPercentage || 'N/A'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            {complianceData.employees.length > 10 && (
+              <p className="text-sm text-muted-foreground text-center mt-4">
+                Showing 10 of {complianceData.employees.length} employees
+              </p>
+            )}
+          </CardContent>
+        </Card>
+      )}
+    </DashboardContent>
+  );
+}
