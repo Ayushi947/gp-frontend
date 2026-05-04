@@ -1,0 +1,267 @@
+# name: Build & Deploy Frontend (ECR + EC2)
+
+# # ===========================
+# # AUTO DEPLOY ON PUSH TO DEV
+# # ===========================
+# on:
+#   push:
+#     branches:
+#       - dev
+#   workflow_dispatch:
+
+# env:
+#   AWS_REGION: ap-south-1
+#   ECR_REPO: glidingpath-dev-frontend
+
+#   # Quote the account ID
+#   AWS_ACCOUNT_ID: "057493959479"
+
+#   DEPLOY_DIR: /home/ubuntu/workspace/gp-frontend
+#   EC2_USER: ubuntu
+
+# jobs:
+#   deploy:
+#     # Only allow deployment from dev branch
+#     if: github.ref_name == 'dev'
+#     runs-on: ubuntu-latest
+
+#     env:
+#       EC2_HOST: ${{ secrets.EC2_HOST }}
+
+#     steps:
+#       # ---------------------------
+#       # Checkout
+#       # ---------------------------
+#       - name: Checkout repository
+#         uses: actions/checkout@v4
+
+#       # ---------------------------
+#       # SSH Prep
+#       # ---------------------------
+#       - name: Prepare SSH key
+#         run: |
+#           mkdir -p ~/.ssh
+#           echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
+#           chmod 600 ~/.ssh/deploy_key
+#           ssh-keyscan -H "${{ secrets.EC2_HOST }}" >> ~/.ssh/known_hosts
+
+#       # ---------------------------
+#       # Sync code to EC2
+#       # ---------------------------
+#       - name: Sync code to EC2
+#         run: |
+#           rsync -avz --delete \
+#             --exclude '.git' \
+#             --exclude 'node_modules' \
+#             --exclude '.next' \
+#             -e "ssh -i ~/.ssh/deploy_key" \
+#             ./ $EC2_USER@$EC2_HOST:$DEPLOY_DIR/
+
+#       # ---------------------------
+#       # Build, Push & Deploy on EC2 (Native ARM64)
+#       # ---------------------------
+#       - name: Build, Push & Deploy on EC2
+#         run: |
+#           IMAGE_TAG=${GITHUB_SHA}
+
+#           ssh -i ~/.ssh/deploy_key \
+#             $EC2_USER@$EC2_HOST \
+#             "IMAGE_TAG=$IMAGE_TAG \
+#              NEXT_PUBLIC_API_BASE_URL=${{ secrets.NEXT_PUBLIC_API_BASE_URL }} \
+#              NEXTAUTH_URL=${{ secrets.NEXTAUTH_URL }} \
+#              NEXTAUTH_SECRET=${{ secrets.NEXTAUTH_SECRET }} \
+#              bash -s" << 'EOF'
+#           set -e
+
+#           ACCOUNT_ID="057493959479"
+#           REGION="ap-south-1"
+#           REPO="glidingpath-dev-frontend"
+#           DEPLOY_DIR="/home/ubuntu/workspace/gp-frontend"
+
+#           FRONTEND_IMAGE="${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com/${REPO}:${IMAGE_TAG}"
+#           export FRONTEND_IMAGE
+
+#           echo "=== Building image on EC2 (native ARM64) ==="
+#           cd ${DEPLOY_DIR}
+
+#           # Login to ECR
+#           aws ecr get-login-password --region ${REGION} | \
+#             docker login --username AWS --password-stdin \
+#             ${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com
+
+#           # Build image (native ARM64 - fast!)
+#           echo "Building: ${FRONTEND_IMAGE}"
+#           docker build \
+#             --build-arg NEXT_PUBLIC_API_BASE_URL=${NEXT_PUBLIC_API_BASE_URL} \
+#             --build-arg NEXTAUTH_URL=${NEXTAUTH_URL} \
+#             --build-arg NEXTAUTH_SECRET=${NEXTAUTH_SECRET} \
+#             -t "${FRONTEND_IMAGE}" .
+
+#           # Push to ECR
+#           echo "Pushing to ECR..."
+#           docker push "${FRONTEND_IMAGE}"
+
+#           # Deploy with docker-compose
+#           echo "Deploying..."
+#           docker compose down
+#           docker compose pull
+#           docker compose up -d --remove-orphans
+#           docker compose ps
+
+#           # Cleanup old images
+#           docker image prune -f
+#           EOF
+
+#       # ---------------------------
+#       # Cleanup
+#       # ---------------------------
+#       - name: Cleanup SSH key
+#         run: rm -f ~/.ssh/deploy_key
+
+name: Build & Deploy Frontend (ECR + EC2)
+
+on:
+  push:
+    branches:
+      - dev
+  workflow_dispatch:
+
+env:
+  AWS_REGION: ap-south-1
+  ECR_REPO: glidingpath-dev-frontend
+  AWS_ACCOUNT_ID: "057493959479"
+  DEPLOY_DIR: /home/ubuntu/workspace/gp-frontend
+  EC2_USER: ubuntu
+
+jobs:
+  build:
+    if: github.ref_name == 'dev'
+    runs-on: ubuntu-latest
+
+    env:
+      EC2_HOST: ${{ secrets.EC2_HOST }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Prepare SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "${{ secrets.EC2_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Sync code to EC2
+        run: |
+          rsync -avz --delete \
+            --exclude '.git' \
+            --exclude 'node_modules' \
+            --exclude '.next' \
+            -e "ssh -i ~/.ssh/deploy_key" \
+            ./ $EC2_USER@$EC2_HOST:$DEPLOY_DIR/
+
+      - name: Build & Push on EC2
+        run: |
+          IMAGE_TAG=${GITHUB_SHA}
+
+          ssh -i ~/.ssh/deploy_key \
+            $EC2_USER@$EC2_HOST \
+            "IMAGE_TAG=$IMAGE_TAG \
+             NEXT_PUBLIC_API_BASE_URL=${{ secrets.NEXT_PUBLIC_API_BASE_URL }} \
+             NEXTAUTH_URL=${{ secrets.NEXTAUTH_URL }} \
+             NEXTAUTH_SECRET=${{ secrets.NEXTAUTH_SECRET }} \
+             bash -s" << 'EOF'
+          set -e
+
+          ACCOUNT_ID="057493959479"
+          REGION="ap-south-1"
+          REPO="glidingpath-dev-frontend"
+          DEPLOY_DIR="/home/ubuntu/workspace/gp-frontend"
+
+          FRONTEND_IMAGE="${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com/${REPO}:${IMAGE_TAG}"
+          export FRONTEND_IMAGE
+
+          echo "=== Building image on EC2 (native ARM64) ==="
+          cd ${DEPLOY_DIR}
+
+          aws ecr get-login-password --region ${REGION} | \
+            docker login --username AWS --password-stdin \
+            ${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com
+
+          echo "Building: ${FRONTEND_IMAGE}"
+          docker build \
+            --build-arg NEXT_PUBLIC_API_BASE_URL=${NEXT_PUBLIC_API_BASE_URL} \
+            --build-arg NEXTAUTH_URL=${NEXTAUTH_URL} \
+            --build-arg NEXTAUTH_SECRET=${NEXTAUTH_SECRET} \
+            -t "${FRONTEND_IMAGE}" .
+
+          echo "Pushing to ECR..."
+          docker push "${FRONTEND_IMAGE}"
+
+          echo "=== Image pushed successfully ==="
+          EOF
+
+      - name: Cleanup SSH key
+        run: rm -f ~/.ssh/deploy_key
+
+  # ===========================
+  # DEPLOY JOB
+  # ===========================
+  deploy:
+    needs: build
+    if: github.ref_name == 'dev'
+    runs-on: ubuntu-latest
+
+    env:
+      EC2_HOST: ${{ secrets.EC2_HOST }}
+
+    steps:
+      - name: Prepare SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "$EC2_HOST" >> ~/.ssh/known_hosts
+
+      - name: Deploy on EC2
+        run: |
+          IMAGE_TAG=${GITHUB_SHA}
+
+          ssh -i ~/.ssh/deploy_key \
+            $EC2_USER@$EC2_HOST \
+            "IMAGE_TAG=$IMAGE_TAG \
+             NEXT_PUBLIC_API_BASE_URL=${{ secrets.NEXT_PUBLIC_API_BASE_URL }} \
+             NEXTAUTH_URL=${{ secrets.NEXTAUTH_URL }} \
+             NEXTAUTH_SECRET=${{ secrets.NEXTAUTH_SECRET }} \
+             bash -s" << 'EOF'
+          set -e
+
+          ACCOUNT_ID="057493959479"
+          REGION="ap-south-1"
+          REPO="glidingpath-dev-frontend"
+          DEPLOY_DIR="/home/ubuntu/workspace/gp-frontend"
+
+          FRONTEND_IMAGE="${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com/${REPO}:${IMAGE_TAG}"
+          export FRONTEND_IMAGE
+
+          echo "=== Login to ECR ==="
+          aws ecr get-login-password --region ${REGION} | \
+            docker login --username AWS --password-stdin \
+            ${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com
+
+          echo "=== Pull latest image ==="
+          docker pull ${FRONTEND_IMAGE}
+
+          echo "=== Deploy with docker-compose ==="
+          cd ${DEPLOY_DIR}
+          docker compose down
+          docker compose up -d --remove-orphans
+
+          docker compose ps
+
+          docker image prune -f
+          EOF
+
+      - name: Cleanup SSH key
+        run: rm -f ~/.ssh/deploy_key
